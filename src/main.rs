@@ -1,84 +1,105 @@
 use clap::Parser;
 use memmap::MmapOptions;
+use std::collections::HashMap;
 use std::io;
+use std::net::Ipv4Addr;
+use std::sync::Arc;
+use std::thread;
+use tqdm::tqdm;
+use pnet::packet::{ethernet::EthernetPacket, ipv4::Ipv4Packet, Packet};
+
+// pub mod driver;
+pub mod reader;
 
 #[derive(Parser)]
 struct Args {
     fname: String,
-}
 
-#[derive(Debug)]
-struct PacketDescriptor {
-    offset: usize,
-    ts_sec: u32,
-    ts_subsec: u32,
-    cap_len: u32,
-    orig_len: u32,
-}
+    #[arg(long)]
+    ip_src: String,
 
-fn read_u32(pcap: &[u8], offset: usize) -> u32 {
-    let mut u32bytes = [0u8; 4];
-    u32bytes.copy_from_slice(&pcap[offset..offset + 4]);
-    return u32::from_ne_bytes(u32bytes);
-}
+    #[arg(short = 'Y', long)]
+    display_filter: Option<String>,
 
-fn read_u16(pcap: &[u8], offset: usize) -> u16 {
-    let mut u16bytes = [0u8; 2];
-    u16bytes.copy_from_slice(&pcap[offset..offset + 2]);
-    return u16::from_ne_bytes(u16bytes);
-}
-
-fn read_packet(pcap: &[u8], offset: usize) -> (PacketDescriptor, usize) {
-    let ts_sec = read_u32(pcap, offset);
-    let ts_subsec = read_u32(pcap, offset + 4);
-    let cap_len = read_u32(pcap, offset + 8);
-    let orig_len = read_u32(pcap, offset + 12);
-
-    (
-        PacketDescriptor {
-            offset,
-            ts_sec,
-            ts_subsec,
-            cap_len,
-            orig_len,
-        },
-        offset + 16 + cap_len as usize,
-    )
+    #[arg(short, long)]
+    count: bool,
 }
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
+    let filtersrc: Ipv4Addr = args.ip_src.parse().expect("invalid ipv4 addr");
     let f = std::fs::File::open(args.fname)?;
-    let flen = f.metadata()?.len();
-    let mmap = unsafe { MmapOptions::new().map(&f)? };
+    let mmap = Arc::new(unsafe { MmapOptions::new().map(&f)? });
 
-    let magic = read_u32(&mmap, 0);
-    assert!(magic == 0xA1B2C3D4);
+    let nthreads = 16;
 
-    let major = read_u16(&mmap, 4);
-    let minor = read_u16(&mmap, 6);
-    println!("pcap ver: {}.{}", major, minor);
+    reader::read_header(&mmap);
+    let packets = Arc::new(reader::build_packet_index(&mmap));
+    println!("n_packets = {}", packets.len());
 
-    // reserved - mmap[8..12]
-    // reserved - mmap[12..16]
-    // snaplen - mmap[16..20]
-    let fcs_f = mmap[20] / (1 << 4);
-    // 0.. - mmap[21]
-    // linktype - mmap[22..24]
-    println!("fcs_f={:b}", fcs_f);
-    // For now let's assume that the fcs is always absent
-    assert!(fcs_f == 0);
+    let npackets = packets.len();
+    let npackets_per_thread = 1 + npackets / nthreads;
 
-    let mut n_packets = 0;
-    // first packet starts at byte 24
-    let mut offset = 24;
-    while offset < flen as usize {
-        let (_packet, new_offset) = read_packet(&mmap, offset);
-        offset = new_offset;
-        // println!("packet={:?}", packet);
-        n_packets += 1;
+    let pcap_pkt_header = 16;
+    let ethernet_header = 14;
+    let header_offset = pcap_pkt_header + ethernet_header;
+
+    let mut children = vec![];
+    for i in 0..nthreads {
+        let mmap = mmap.clone();
+        let start = i * npackets_per_thread;
+        let end = std::cmp::min(start + npackets_per_thread, npackets);
+        let packets = packets.clone();
+        children.push(thread::spawn(move || {
+            let mut map: HashMap<Ipv4Addr, HashMap<Ipv4Addr, usize>> = HashMap::new();
+            for pkt in tqdm(&packets[start..end]) {
+                let ip_src = Ipv4Addr::from(
+                    reader::read_u32(&mmap, pkt.offset + header_offset + 12).to_be(),
+                );
+                let ip_dst = Ipv4Addr::from(
+                    reader::read_u32(&mmap, pkt.offset + header_offset + 16).to_be(),
+                );
+                if !map.contains_key(&ip_src) {
+                    map.insert(ip_src, HashMap::new());
+                }
+                if let Some(m) = map.get_mut(&ip_src) {
+                    let count = m.get(&ip_dst).map(|x| *x).unwrap_or(0);
+                    m.insert(ip_dst, count + 1);
+                } else {
+                    panic!("???")
+                }
+            }
+            map
+        }));
     }
-    println!("n_packets = {}", n_packets);
+
+    let mut map: HashMap<Ipv4Addr, HashMap<Ipv4Addr, usize>> = HashMap::new();
+    for c in tqdm(children) {
+        let res = c.join().expect("thread failed");
+        for (k, v) in &res {
+            if !map.contains_key(&k) {
+                map.insert(*k, HashMap::new());
+            }
+            map.get_mut(&k).map(|m| {
+                for (dst, cnt) in v {
+                    let count = m.get(&dst).map(|x| *x).unwrap_or(0);
+                    m.insert(*dst, count + cnt);
+                }
+            });
+        }
+    }
+    println!("{:?}", map);
+
+    // GPU version:
+    //   Create GPU devices/buffers
+    //   copy portion of pcap into a buffer (stop on packet boundry)
+    //   copy packet offsets into a buffer
+    //   compile filter into a WGSL expression
+    //   compile wgsl program
+    //   create output buffer for each thread (write packets offsets of passing packets)
+    //   create output buffer for n packet/thread
+    //   on device, evaluate filter per packet and write offset into output if filter passes
+    //   on host, collect results/display passing packets
 
     Ok(())
 }
