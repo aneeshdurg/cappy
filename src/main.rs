@@ -6,7 +6,6 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::thread;
 use tqdm::tqdm;
-use pnet::packet::{ethernet::EthernetPacket, ipv4::Ipv4Packet, Packet};
 
 // pub mod driver;
 pub mod reader;
@@ -14,9 +13,6 @@ pub mod reader;
 #[derive(Parser)]
 struct Args {
     fname: String,
-
-    #[arg(long)]
-    ip_src: String,
 
     #[arg(short = 'Y', long)]
     display_filter: Option<String>,
@@ -27,7 +23,6 @@ struct Args {
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
-    let filtersrc: Ipv4Addr = args.ip_src.parse().expect("invalid ipv4 addr");
     let f = std::fs::File::open(args.fname)?;
     let mmap = Arc::new(unsafe { MmapOptions::new().map(&f)? });
 
@@ -52,7 +47,7 @@ fn main() -> io::Result<()> {
         let packets = packets.clone();
         children.push(thread::spawn(move || {
             let mut map: HashMap<Ipv4Addr, HashMap<Ipv4Addr, usize>> = HashMap::new();
-            for pkt in tqdm(&packets[start..end]) {
+            for pkt in &packets[start..end] {
                 let ip_src = Ipv4Addr::from(
                     reader::read_u32(&mmap, pkt.offset + header_offset + 12).to_be(),
                 );
@@ -62,12 +57,10 @@ fn main() -> io::Result<()> {
                 if !map.contains_key(&ip_src) {
                     map.insert(ip_src, HashMap::new());
                 }
-                if let Some(m) = map.get_mut(&ip_src) {
+                map.get_mut(&ip_src).map(|m| {
                     let count = m.get(&ip_dst).map(|x| *x).unwrap_or(0);
                     m.insert(ip_dst, count + 1);
-                } else {
-                    panic!("???")
-                }
+                });
             }
             map
         }));
