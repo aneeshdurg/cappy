@@ -10,6 +10,16 @@ use tqdm::tqdm;
 // pub mod driver;
 pub mod reader;
 
+#[link(name = "cappy_kernel", kind = "static")]
+extern "C" {
+    fn cappy_main(
+        n_pkts: usize,
+        pkt_offsets: *const u64,
+        pcap: *const u8,
+        pcap_size: usize,
+    ) -> *mut u8;
+}
+
 #[derive(Parser)]
 struct Args {
     fname: String,
@@ -29,10 +39,18 @@ fn main() -> io::Result<()> {
     let nthreads = 16;
 
     reader::read_header(&mmap);
-    let packets = Arc::new(reader::build_packet_index(&mmap));
+    let packets = reader::build_packet_index(&mmap);
+    let npackets = packets.len();
+
+    let offsets: Vec<u64> = (&packets).into_iter().map(|x| x.offset as u64).collect();
     println!("n_packets = {}", packets.len());
 
-    let npackets = packets.len();
+    let res = unsafe {
+        let res = cappy_main(npackets, offsets.as_ptr(), (&mmap).as_ptr(), mmap.len());
+        std::slice::from_raw_parts(res, npackets)
+    };
+
+    let packets = Arc::new(packets);
     let npackets_per_thread = 1 + npackets / nthreads;
 
     let pcap_pkt_header = 16;
