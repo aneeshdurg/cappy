@@ -13,13 +13,30 @@
     ipv4;                                                                      \
   })
 
+__device__ uint32_t access_u32(char *d_pcap, uint64_t offset) {
+  // only aligned accesses are allowed, so we need to align offset to a 32b
+  // boundry
+  auto rem = offset % 4;
+  auto start = offset - rem;
+
+  auto first = *(uint32_t *)(d_pcap + start);
+  auto last = *(uint32_t *)(d_pcap + start + 4);
+
+  // get the last `rem` bytes from `first` and the first `4 - rem` bytes from
+  // last
+  first <<= 8 * (4 - rem);
+  last >>= 8 * rem;
+
+  return first | last;
+}
+
 /**
  * CUDA Kernel Device code
  *
  * Computes the vector addition of A and B into C. The 3 vectors have the same
  * number of elements numElements.
  */
-__global__ void filterpckts(uint64_t *d_offsets, char *d_pcap, char *output,
+__global__ void filterpckts(uint64_t *d_offsets, char *d_pcap, uint32_t *output,
                             uint64_t n_pkts) {
   int i = blockDim.x * blockIdx.x + threadIdx.x;
   if (i > n_pkts) {
@@ -31,10 +48,11 @@ __global__ void filterpckts(uint64_t *d_offsets, char *d_pcap, char *output,
   constexpr size_t header_offset = pcap_pkt_header + ethernet_header;
 
   auto offset = d_offsets[i];
-  uint32_t ip_src = *(uint32_t *)(d_pcap + offset + header_offset + 12);
+  uint32_t ip_src = access_u32(d_pcap, offset + header_offset + 12);
   // uint32_t ip_dst = *(int32_t *)(d_pcap + offset + header_offset + 16);
   output[i] = 0;
-  if (ip_src == IPV4(192, 168, 68, 110)) {
+  // if (ip_src == IPV4(192, 168, 68, 110)) {
+  if (ip_src == IPV4(21, 98, 0, 0)) {
     output[i] = 1;
   }
 }
@@ -61,7 +79,7 @@ char *cappy_main(size_t n_pkts, uint64_t *const pkt_offsets, char *const pcap,
   auto offsets_size = n_pkts * sizeof(uint64_t);
   uint64_t *d_offsets = (uint64_t *)CuAlloc(offsets_size);
   char *d_pcap = (char *)CuAlloc(pcap_size);
-  char *d_output = (char *)CuAlloc(n_pkts);
+  uint32_t *d_output = (uint32_t *)CuAlloc(n_pkts * sizeof(uint32_t));
 
   // Copy the host input vectors A and B in host memory to the device input
   // vectors in device memory
@@ -98,7 +116,7 @@ char *cappy_main(size_t n_pkts, uint64_t *const pkt_offsets, char *const pcap,
     exit(EXIT_FAILURE);
   }
 
-  char *h_output = (char *)malloc(n_pkts);
+  char *h_output = (char *)malloc(n_pkts * sizeof(uint32_t));
   if (h_output == NULL) {
     fprintf(stderr, "failed to allocate host output\n");
     exit(EXIT_FAILURE);
@@ -107,7 +125,8 @@ char *cappy_main(size_t n_pkts, uint64_t *const pkt_offsets, char *const pcap,
   // Copy the device result vector in device memory to the host result vector
   // in host memory.
   printf("Copy output data from the CUDA device to the host memory\n");
-  err = cudaMemcpy(h_output, d_output, n_pkts, cudaMemcpyDeviceToHost);
+  err = cudaMemcpy(h_output, d_output, n_pkts * sizeof(uint32_t),
+                   cudaMemcpyDeviceToHost);
   if (err != cudaSuccess) {
     fprintf(stderr,
             "Failed to copy output from device to host (error code %s)!\n",

@@ -17,7 +17,7 @@ extern "C" {
         pkt_offsets: *const u64,
         pcap: *const u8,
         pcap_size: usize,
-    ) -> *mut u8;
+    ) -> *mut u32;
 }
 
 #[derive(Parser)]
@@ -49,6 +49,7 @@ fn main() -> io::Result<()> {
         let res = cappy_main(npackets, offsets.as_ptr(), (&mmap).as_ptr(), mmap.len());
         std::slice::from_raw_parts(res, npackets)
     };
+    println!("npassed = {}", res.iter().map(|x| *x as u64).sum::<u64>());
 
     let packets = Arc::new(packets);
     let npackets_per_thread = 1 + npackets / nthreads;
@@ -100,6 +101,10 @@ fn main() -> io::Result<()> {
         }
     }
     println!("{:?}", map);
+
+    for (k, v) in map {
+        println!("{} -> {}", k, v.values().sum::<usize>());
+    }
 
     // GPU version:
     //   Create GPU devices/buffers
