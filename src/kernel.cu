@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <stdio.h>
+#include <arpa/inet.h>
 
 // For the CUDA runtime routines (prefixed with "cuda_")
 #include <cuda_runtime.h>
@@ -13,19 +14,35 @@
     ipv4;                                                                      \
   })
 
+__device__ uint32_t bswap(uint32_t x) {
+  uint32_t b0 = x % 256;
+  x /= 256;
+  uint32_t b1 = x % 256;
+  x /= 256;
+  uint32_t b2 = x % 256;
+  x /= 256;
+  uint32_t b3 = x % 256;
+
+  return (((b0 * 256) + b1) * 256 + b2) * 256 + b3;
+}
+
 __device__ uint32_t access_u32(char *d_pcap, uint64_t offset) {
   // only aligned accesses are allowed, so we need to align offset to a 32b
   // boundry
   auto rem = offset % 4;
   auto start = offset - rem;
 
-  auto first = *(uint32_t *)(d_pcap + start);
-  auto last = *(uint32_t *)(d_pcap + start + 4);
+  // Read the ip address with the correct endianess
+  auto first = bswap(*(uint32_t *)(d_pcap + start));
+  if (rem == 0) {
+    return first;
+  }
+  auto last = bswap(*(uint32_t *)(d_pcap + start + 4));
 
   // get the last `rem` bytes from `first` and the first `4 - rem` bytes from
   // last
-  first <<= 8 * (4 - rem);
-  last >>= 8 * rem;
+  first <<= 8 * rem;
+  last >>= 8 * (4 - rem);
 
   return first | last;
 }
@@ -43,16 +60,16 @@ __global__ void filterpckts(uint64_t *d_offsets, char *d_pcap, uint32_t *output,
     return;
   }
 
-  constexpr size_t pcap_pkt_header = 16;
-  constexpr size_t ethernet_header = 14;
-  constexpr size_t header_offset = pcap_pkt_header + ethernet_header;
+  constexpr uint64_t pcap_pkt_header = 16;
+  constexpr uint64_t ethernet_header = 14;
+  constexpr uint64_t header_offset = pcap_pkt_header + ethernet_header;
 
   auto offset = d_offsets[i];
   uint32_t ip_src = access_u32(d_pcap, offset + header_offset + 12);
   // uint32_t ip_dst = *(int32_t *)(d_pcap + offset + header_offset + 16);
+  // output[i] = ip_src;
   output[i] = 0;
-  // if (ip_src == IPV4(192, 168, 68, 110)) {
-  if (ip_src == IPV4(21, 98, 0, 0)) {
+  if (ip_src == IPV4(192, 168, 68, 110)) {
     output[i] = 1;
   }
 }

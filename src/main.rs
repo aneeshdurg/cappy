@@ -5,7 +5,6 @@ use std::io;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::thread;
-use tqdm::tqdm;
 
 // pub mod driver;
 pub mod reader;
@@ -45,11 +44,13 @@ fn main() -> io::Result<()> {
     let offsets: Vec<u64> = (&packets).into_iter().map(|x| x.offset as u64).collect();
     println!("n_packets = {}", packets.len());
 
+    let timer = std::time::Instant::now();
     let res = unsafe {
         let res = cappy_main(npackets, offsets.as_ptr(), (&mmap).as_ptr(), mmap.len());
         std::slice::from_raw_parts(res, npackets)
     };
     println!("npassed = {}", res.iter().map(|x| *x as u64).sum::<u64>());
+    println!("  elapsed = {:?}", timer.elapsed());
 
     let packets = Arc::new(packets);
     let npackets_per_thread = 1 + npackets / nthreads;
@@ -58,6 +59,14 @@ fn main() -> io::Result<()> {
     let ethernet_header = 14;
     let header_offset = pcap_pkt_header + ethernet_header;
 
+    // let ref_ip: Ipv4Addr = "192.168.68.110".parse().unwrap();
+    // for pkt in &(*packets) {
+    //     let ip_src =
+    //         Ipv4Addr::from(reader::read_u32(&mmap, pkt.offset + header_offset + 12).to_be());
+    //     println!("cpu res = {:?}", ip_src);
+    // }
+
+    let timer = std::time::Instant::now();
     let mut children = vec![];
     for i in 0..nthreads {
         let mmap = mmap.clone();
@@ -86,7 +95,7 @@ fn main() -> io::Result<()> {
     }
 
     let mut map: HashMap<Ipv4Addr, HashMap<Ipv4Addr, usize>> = HashMap::new();
-    for c in tqdm(children) {
+    for c in children {
         let res = c.join().expect("thread failed");
         for (k, v) in &res {
             if !map.contains_key(&k) {
@@ -100,22 +109,11 @@ fn main() -> io::Result<()> {
             });
         }
     }
-    println!("{:?}", map);
+    // println!("{:?}", map);
 
-    for (k, v) in map {
-        println!("{} -> {}", k, v.values().sum::<usize>());
-    }
-
-    // GPU version:
-    //   Create GPU devices/buffers
-    //   copy portion of pcap into a buffer (stop on packet boundry)
-    //   copy packet offsets into a buffer
-    //   compile filter into a WGSL expression
-    //   compile wgsl program
-    //   create output buffer for each thread (write packets offsets of passing packets)
-    //   create output buffer for n packet/thread
-    //   on device, evaluate filter per packet and write offset into output if filter passes
-    //   on host, collect results/display passing packets
+    let tgt_ip = "192.168.68.110".parse().unwrap();
+    println!("cpu res = {:?}", map.get(&tgt_ip).unwrap().values().sum::<usize>());
+    println!("  elapsed = {:?}", timer.elapsed());
 
     Ok(())
 }
