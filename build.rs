@@ -7,6 +7,7 @@ fn main() {
         .ccbin(false)
         .flag("-cudart=shared")
         .file("src/kernel.cu")
+        .opt_level(3)
         .compile("libcappy_kernel.a");
 
     /* Link CUDA Runtime (libcudart.so) */
